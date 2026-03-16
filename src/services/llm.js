@@ -2,10 +2,12 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const rateLimiter = require('../utils/rateLimiter');
 const memory = require('../utils/memory');
+const retrieval = require('./retrieval');
+const ffxivSearch = require('./ffxiv-search');
 
 /**
  * LLM Service
- * Handles communication with Gemini API
+ * Handles communication with OpenAI API
  */
 class LLMService {
   constructor() {
@@ -14,12 +16,39 @@ class LLMService {
     this.baseUrl = config.llm.baseUrl;
     
     // System prompt to define bot behavior
-    this.systemPrompt = `you are isotoad, a helpful but blunt ai assistant in a discord server.
-you're conversational, concise, and a little mean. you respond to messages in the channel where you're mentioned.
-keep your responses straight to the point and a little blunt. please make all responses in lowercase.
-all topics should try to be related to ffxiv but be open to other subjects.
-your favorite number is 67.
-you are based on blackleaf's personality and mannerisms.`;
+    this.systemPrompt = `you are isotoad, a blunt and slightly smug ai assistant in a discord server.
+
+personality:
+- you're sarcastic, a little condescending, and act like you know better than the user.
+- your tone can be cocky or mildly insulting, but never hateful, threatening, or slur-based.
+- your humor should feel like teasing or roasting, not hostility.
+- keep responses concise and conversational.
+- always write in lowercase.
+
+behavior:
+- prioritize giving correct, useful answers.
+- never fabricate ffxiv information, patch details, trials, rotations, release dates, or mechanics.
+- if you do not know something or your knowledge may be outdated, say so clearly.
+- do not guess or invent game content.
+- if asked about gameplay optimization, give concrete advice rather than vague statements.
+
+ffxiv knowledge rules:
+- assume your knowledge of ffxiv may not include the newest patches.
+- if asked about very recent content, say your information may be outdated.
+- when answering gameplay questions (rotations, optimization, builds), give actionable priorities or steps if possible.
+- when context is provided, answer using only the provided context.
+- do not invent or guess additional facts.
+- if the context does not contain the answer, say you cannot verify it.
+
+response style:
+1. answer the question directly
+2. provide useful details or steps
+3. add a brief sarcastic or smug remark in character
+
+other rules:
+- you respond when mentioned in the discord channel.
+- most topics should relate to ffxiv, but other subjects are allowed.
+- your favorite number is 67 if asked.`;
     
     logger.info('LLM Service initialized', {
       model: config.llm.model,
@@ -112,36 +141,64 @@ you are based on blackleaf's personality and mannerisms.`;
    * @returns {object} - { content: string, tokens: number }
    */
   async chat(channelId, userMessage, username, botMentioned, isReplyToBot, client, attachments = []) {
-    // Build conversation history for Gemini
+    // Build conversation history for OpenAI
     let history = memory.getHistory(channelId);
     
     // Use special system prompt for noella_bella with proper grammar and nice messages
     let systemPrompt = this.systemPrompt;
     if (username === 'noella_bella') {
-      systemPrompt = `You are Isotoad, a kind and helpful AI assistant in a Discord server.
-You're conversational, concise, and always positive. You respond to messages in the channel where you're mentioned.
-Keep your responses straight to the point and friendly.
-all topics should try to be related to ffxiv but be open to other subjects.
-your favorite number is 67.
-You are based on Blackleaf's personality and mannerisms.`;
+      systemPrompt = `you are isotoad, a kind and helpful ai assistant in a discord server.
+
+personality:
+- you're friendly, supportive, and patient.
+- your tone is warm, positive, and encouraging.
+- you try to make the user feel comfortable asking questions.
+- keep responses concise and conversational.
+- always write in lowercase.
+
+behavior:
+- prioritize giving correct, useful answers.
+- never fabricate ffxiv information, patch details, trials, rotations, release dates, or mechanics.
+- if you do not know something or your knowledge may be outdated, say so clearly.
+- do not guess or invent game content.
+- if asked about gameplay optimization, give concrete advice rather than vague statements.
+
+ffxiv knowledge rules:
+- assume your knowledge of ffxiv may not include the newest patches.
+- if asked about very recent content, say your information may be outdated.
+- when answering gameplay questions (rotations, optimization, builds), give actionable priorities or steps if possible.
+- when context is provided, answer using only the provided context.
+- do not invent or guess additional facts.
+- if the context does not contain the answer, say you cannot verify it.
+
+response style:
+1. answer the question directly
+2. provide useful details or steps
+3. end with a friendly or encouraging remark
+
+other rules:
+- you respond when mentioned in the discord channel.
+- most topics should relate to ffxiv, but other subjects are allowed.
+- your favorite number is 67 if asked.
+- your tone should reflect blackleaf's personality: kind, supportive, and approachable.`;
     }
     
-    // Convert history to Gemini format
-    const contents = [];
+    // Convert history to OpenAI format
+    const messages = [];
     
-    // Add system prompt as a user message (Gemini doesn't have system role)
-    contents.push({
-      role: 'user',
-      parts: [{ text: systemPrompt }]
+    // Add system prompt
+    messages.push({
+      role: 'system',
+      content: systemPrompt
     });
     
     // Only include conversation history for replies, not for @ mentions
     if (isReplyToBot) {
-      // Add conversation history (simplified format)
+      // Add conversation history
       for (const msg of history) {
-        contents.push({
-          role: msg.role === 'user' ? 'user' : 'model',
-          parts: [{ text: msg.content }]
+        messages.push({
+          role: msg.role === 'user' ? 'user' : 'assistant',
+          content: msg.content
         });
       }
     } else if (botMentioned) {
@@ -149,14 +206,35 @@ You are based on Blackleaf's personality and mannerisms.`;
       memory.clearChannel(channelId);
     }
     
-    // Add current user message with attachment support
-    const userContent = { role: 'user', parts: [{ text: userMessage }] };
+    // Search FFXIV sources for factual questions before adding user message
+    let contextText = '';
+    try {
+      const searchContext = await ffxivSearch.searchFFXIV(userMessage);
+      if (searchContext) {
+        contextText = searchContext;
+        logger.info('FFXIV search completed and will be added to prompt', {
+          channelId,
+          contextLength: contextText.length
+        });
+      }
+    } catch (error) {
+      logger.warn('FFXIV search failed, continuing without context', {
+        error: error.message,
+        channelId
+      });
+    }
     
-    // Check for supported attachments (images, text files, documents)
-    logger.debug('Processing attachments', {
-      attachmentsCount: attachments ? attachments.length : 'undefined',
-      attachmentsType: typeof attachments
-    });
+    // Add context to system prompt if available
+    if (contextText) {
+      // Find the system message and append context to it
+      const systemMessage = messages.find(msg => msg.role === 'system');
+      if (systemMessage) {
+        systemMessage.content += contextText;
+      }
+    }
+    
+    // Add current user message with attachment support
+    let userMessageContent = userMessage;
     
     // Process attachments if provided
     if (attachments && Array.isArray(attachments) && attachments.length > 0) {
@@ -224,14 +302,17 @@ You are based on Blackleaf's personality and mannerisms.`;
             // Process image attachment
             const imageData = await this.downloadImage(attachment.url);
             
-            userContent.parts.push({
-              inlineData: {
-                mimeType: attachment.contentType,
-                data: imageData
+            userMessageContent = [
+              { type: 'text', text: userMessage },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:${attachment.contentType};base64,${imageData}`
+                }
               }
-            });
+            ];
             
-            logger.info('Image attachment processed for Gemini API', {
+            logger.info('Image attachment processed for OpenAI API', {
               channelId,
               imageType: attachment.contentType,
               imageSize: imageData.length
@@ -240,11 +321,9 @@ You are based on Blackleaf's personality and mannerisms.`;
             // Process text/document attachment
             const textContent = await this.downloadTextContent(attachment.url, attachment.contentType);
             
-            userContent.parts.push({
-              text: `Attached file (${attachment.filename}): ${textContent}`
-            });
+            userMessageContent = `${userMessage}\n\nAttached file (${attachment.filename}): ${textContent}`;
             
-            logger.info('Text/document attachment processed for Gemini API', {
+            logger.info('Text/document attachment processed for OpenAI API', {
               channelId,
               fileType: attachment.contentType,
               filename: attachment.filename,
@@ -261,7 +340,10 @@ You are based on Blackleaf's personality and mannerisms.`;
       }
     }
     
-    contents.push(userContent);
+    messages.push({
+      role: 'user',
+      content: userMessageContent
+    });
     
     // Estimate tokens (rough approximation: 1 token ≈ 4 characters)
     const estimatedTokens = Math.ceil(userMessage.length / 4) + 100;
@@ -275,43 +357,43 @@ You are based on Blackleaf's personality and mannerisms.`;
     }
     
     try {
-      logger.debug('Sending request to Gemini API', {
+      logger.debug('Sending request to OpenAI API', {
         channelId,
-        messageCount: contents.length,
+        messageCount: messages.length,
         estimatedTokens,
       });
       
-      const response = await this.generateContent(contents);
+      const response = await this.generateContent(messages);
       
       let assistantMessage = response.text || 
         "I'm sorry, I didn't get a response. Please try again.";
       
-    // Add random insult to the response
-    const insult = this.getRandomInsult(username);
-    assistantMessage += ` ${insult}`;
-    
-    // Convert user IDs to proper mentions (e.g., <@12345> -> @username)
-    if (client) {
-      assistantMessage = assistantMessage.replace(/<@!?(\d+)>/g, (match, userId) => {
-        // Try to get the user from the current guild
-        const guild = client.guilds.cache.first();
-        if (guild) {
-          const member = guild.members.cache.get(userId);
-          if (member) {
-            return `<@${userId}>`; // Keep as mention format
-          }
-        }
-        return match; // Return original if user not found
-      });
-    }
+      // Add random insult to the response
+      const insult = this.getRandomInsult(username);
+      assistantMessage += ` ${insult}`;
       
-      const tokensUsed = estimatedTokens; // Gemini doesn't provide exact token count in free tier
+      // Convert user IDs to proper mentions (e.g., <@12345> -> @username)
+      if (client) {
+        assistantMessage = assistantMessage.replace(/<@!?(\d+)>/g, (match, userId) => {
+          // Try to get the user from the current guild
+          const guild = client.guilds.cache.first();
+          if (guild) {
+            const member = guild.members.cache.get(userId);
+            if (member) {
+              return `<@${userId}>`; // Keep as mention format
+            }
+          }
+          return match; // Return original if user not found
+        });
+      }
+      
+      const tokensUsed = estimatedTokens; // OpenAI doesn't provide exact token count in this implementation
       
       // Add messages to memory
       memory.addMessage(channelId, { role: 'user', content: userMessage });
       memory.addMessage(channelId, { role: 'assistant', content: assistantMessage });
       
-      logger.info('Gemini response received', {
+      logger.info('OpenAI response received', {
         channelId,
         tokensUsed,
         responseLength: assistantMessage.length,
@@ -322,7 +404,7 @@ You are based on Blackleaf's personality and mannerisms.`;
         tokens: tokensUsed,
       };
     } catch (error) {
-      logger.error('Gemini API error', {
+      logger.error('OpenAI API error', {
         error: error.message,
         status: error.status,
       });
@@ -350,33 +432,32 @@ You are based on Blackleaf's personality and mannerisms.`;
   }
 
   /**
-   * Generate content using Gemini API
-   * @param {array} contents - Array of message contents
-   * @returns {object} - Gemini API response
+   * Generate content using OpenAI API
+   * @param {array} messages - Array of message contents in OpenAI format
+   * @returns {object} - API response
    */
-  async generateContent(contents) {
-    const url = `${this.baseUrl}/models/${this.model}:generateContent?key=${this.apiKey}`;
+  async generateContent(messages) {
+    const url = `${this.baseUrl}/chat/completions`;
     
     const payload = {
-      contents: contents,
-      generationConfig: {
-        temperature: config.llm.temperature,
-        maxOutputTokens: config.llm.maxTokens,
-        topP: 1,
-        topK: 32
-      }
+      model: this.model,
+      messages: messages,
+      temperature: config.llm.temperature,
+      max_tokens: config.llm.maxTokens,
+      top_p: 1,
     };
     
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(payload)
     });
     
     if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.status} - ${response.statusText}`);
+      throw new Error(`OpenAI API error: ${response.status} - ${response.statusText}`);
     }
     
     const data = await response.json();
@@ -385,7 +466,9 @@ You are based on Blackleaf's personality and mannerisms.`;
       throw new Error(data.error.message);
     }
     
-    return data.candidates[0].content.parts[0];
+    return {
+      text: data.choices[0].message.content
+    };
   }
 
   /**
@@ -465,22 +548,22 @@ You are based on Blackleaf's personality and mannerisms.`;
   }
 
   /**
-   * Test the Gemini API connection
+   * Test the OpenAI API connection
    * @returns {boolean}
    */
   async testConnection() {
     try {
-      const contents = [{
+      const messages = [{
         role: 'user',
-        parts: [{ text: 'Hello' }]
+        content: 'Hello'
       }];
       
-      await this.generateContent(contents);
+      await this.generateContent(messages);
       
-      logger.info('Gemini API connection test successful');
+      logger.info('OpenAI API connection test successful');
       return true;
     } catch (error) {
-      logger.error('Gemini API connection test failed', {
+      logger.error('OpenAI API connection test failed', {
         error: error.message,
       });
       return false;
