@@ -4,6 +4,7 @@ const rateLimiter = require('../utils/rateLimiter');
 const memory = require('../utils/memory');
 const retrieval = require('./retrieval');
 const ffxivSearch = require('./ffxiv-search');
+const fflogs = require('./fflogs');
 
 /**
  * LLM Service
@@ -141,6 +142,17 @@ other rules:
    * @returns {object} - { content: string, tokens: number }
    */
   async chat(channelId, userMessage, username, botMentioned, isReplyToBot, client, attachments = []) {
+    // Route FFLogs-style requests to FFLogs V1 first (no normal LLM answering path)
+    if (fflogs.isFFLogsQuery(userMessage)) {
+      logger.info('Routing message to FFLogs service', {
+        channelId,
+        username,
+        message: userMessage,
+      });
+
+      return this.handleFFLogsMessage(userMessage);
+    }
+
     // Build conversation history for OpenAI
     let history = memory.getHistory(channelId);
     
@@ -429,6 +441,145 @@ other rules:
         tokens: 0,
       };
     }
+  }
+
+  /**
+   * Handle FFLogs lookups and only use LLM to format final response style.
+   */
+  async handleFFLogsMessage(userMessage) {
+    const result = await fflogs.handleQuery(userMessage);
+
+    if (!result.ok) {
+      return {
+        content: result.error || "i couldn't verify that on fflogs.",
+        tokens: 0,
+      };
+    }
+
+    if (!result.hasData || !result.data) {
+      return {
+        content: "i couldn't verify that on fflogs.",
+        tokens: 0,
+      };
+    }
+
+    if (result.metric === 'best_ultimate_parses' && Array.isArray(result.data) && result.data.length === 0) {
+      return {
+        content: "i couldn't verify that on fflogs.",
+        tokens: 0,
+      };
+    }
+
+    const formatted = await this.formatFFLogsWithLLM(result);
+    return {
+      content: formatted,
+      tokens: 0,
+    };
+  }
+
+  formatDuration(durationMs) {
+    const value = Number(durationMs);
+    if (!Number.isFinite(value) || value <= 0) return 'unavailable';
+
+    const totalSeconds = Math.floor(value / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  formatNumeric(value, decimals = 2) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 'unavailable';
+    return number.toFixed(decimals);
+  }
+
+  resolvePatchValue(parseData) {
+    const directPatch = parseData?.patch || parseData?.patchNumber || parseData?.gamePatch;
+    if (directPatch) return String(directPatch);
+
+    const mixedField = parseData?.ilvlKeyOrPatch;
+    if (mixedField === null || mixedField === undefined) return 'unavailable';
+
+    const asText = String(mixedField).trim();
+    // Accept explicit patch-like values only (e.g. "7.2", "7.25", "6.5")
+    if (/^\d+\.\d{1,2}$/.test(asText)) {
+      return asText;
+    }
+
+    return 'unavailable';
+  }
+
+  buildReportUrl(parseData) {
+    const reportId = parseData?.reportID || parseData?.reportId;
+    if (!reportId) return 'unavailable';
+
+    const fightId = parseData?.fightID || parseData?.fightId;
+    if (fightId !== null && fightId !== undefined && fightId !== '') {
+      return `https://www.fflogs.com/reports/${reportId}#fight=${fightId}`;
+    }
+
+    return `https://www.fflogs.com/reports/${reportId}`;
+  }
+
+  buildRequiredFFLogsResponse(result, parseData) {
+    const character = result.parsed.characterName || 'unknown character';
+    const server = result.parsed.server || 'unknown server';
+    const fightName = parseData?.encounterName || parseData?.name || result.selectedEncounter || 'unavailable';
+    const job = parseData?.spec || parseData?.job || parseData?.class || 'unavailable';
+    const percentile = this.formatNumeric(parseData?.percentile, 2);
+    const rank = parseData?.rank !== undefined && parseData?.rank !== null ? String(parseData.rank) : 'unavailable';
+    const duration = this.formatDuration(parseData?.duration);
+    const adps = this.formatNumeric(parseData?.adps ?? parseData?.aDPS, 2);
+    const adpsFromTotal = this.formatNumeric(parseData?.total, 2);
+    const patch = this.resolvePatchValue(parseData);
+    const reportUrl = this.buildReportUrl(parseData);
+    const difficulty = result.selectedDifficulty || 'unknown';
+    const metricUsed = result.metricUsed || result.requestedParseMetric || 'dps';
+    const metricSourceField = result.metricSourceField || 'unknown';
+    const metricValue = this.formatNumeric(result.selectedMetricValue, 2);
+    const metricsPresent = Array.isArray(result.rawMetricFieldsPresent) && result.rawMetricFieldsPresent.length > 0
+      ? result.rawMetricFieldsPresent.join(', ')
+      : 'none';
+    const fallbackNote = result.metricFallbackUsed
+      ? `yes (${result.metricFallbackReason || 'no reason provided'})`
+      : 'no';
+
+    return [
+      `${difficulty} ${metricUsed} parse found`,
+      `${character} | ${server}`,
+      `fight name: ${fightName}`,
+      `job: ${job}`,
+      `percentile: ${percentile} | rank: ${rank}`,
+      `duration: ${duration}`,
+      `metric used: adps | value: ${metricValue}`,
+      `metric source field: ${metricSourceField}`,
+      `adps (native): ${adps} | adps (from total): ${adpsFromTotal}`,
+      `metrics present in response: ${metricsPresent}`,
+      `metric fallback used: ${fallbackNote}`,
+      `patch: ${patch}`,
+      `report: ${reportUrl}`,
+      `selected difficulty: ${difficulty}`,
+    ].join('\n');
+  }
+
+  /**
+   * Format FFLogs output in isotoad style without generating new facts.
+   */
+  async formatFFLogsWithLLM(result) {
+    const d = result.data;
+
+    if (result.metric === 'best_ultimate_parses' && Array.isArray(d)) {
+      const blocks = d.slice(0, 10).map((item) => {
+        const normalizedResult = {
+          ...result,
+          selectedDifficulty: item.category || result.selectedDifficulty || 'ultimate',
+        };
+        return this.buildRequiredFFLogsResponse(normalizedResult, item.bestParse || {});
+      });
+      return blocks.join('\n\n');
+    }
+
+    return this.buildRequiredFFLogsResponse(result, d || {});
   }
 
   /**

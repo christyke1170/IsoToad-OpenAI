@@ -21,6 +21,11 @@ const config = {
     temperature: 0.7,
   },
 
+  // FFLogs V1 API Configuration
+  fflogs: {
+    apiKey: process.env.FFLOGS_API_KEY,
+  },
+
   // Rate Limiting
   rateLimit: {
     maxMessagesPerMinute: parseInt(process.env.MAX_MESSAGES_PER_MINUTE || '10'),
