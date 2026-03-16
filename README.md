@@ -1,10 +1,10 @@
 # Discord AI Bot 🤖
 
-A beginner-friendly Discord chatbot with **Gemini API integration**, conversation memory, and rate limiting.
+A beginner-friendly Discord chatbot with **OpenAI API integration**, conversation memory, and rate limiting.
 
 ## Features
 
-- **Gemini API Integration**: Connect to Google's Gemini 1.5 Flash/Pro models
+- **OpenAI API Integration**: Connect to OpenAI models
 - **Conversation Memory**: Remembers context within each channel for natural conversations
 - **Rate Limiting**: Prevents spam and runaway API costs
 - **Slash Commands**: Modern Discord interactions
@@ -15,7 +15,7 @@ A beginner-friendly Discord chatbot with **Gemini API integration**, conversatio
 
 - Node.js 18+
 - A Discord bot token
-- A Gemini API key from Google AI Studio
+- An OpenAI API key
 
 ## Quick Start
 
@@ -34,10 +34,10 @@ Copy `.env.example` to `.env` and fill in your values:
 # Discord Bot Token (get from https://discord.com/developers/applications)
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
 
-# Gemini API Configuration
-LLM_API_KEY=your_gemini_api_key_here
-LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/
-LLM_MODEL=gemini-1.5-flash
+# OpenAI API Configuration
+LLM_API_KEY=sk-your_openai_api_key_here
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
 
 # Bot Settings
 BOT_PREFIX=!
@@ -109,14 +109,6 @@ discord-ai-bot/
 
 ## API Options
 
-### Gemini (Recommended - Free Tier Available)
-
-```env
-LLM_API_KEY=your_gemini_api_key_here
-LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/
-LLM_MODEL=gemini-1.5-flash  # or gemini-1.5-pro
-```
-
 ### OpenAI
 
 ```env
@@ -143,7 +135,7 @@ LLM_BASE_URL=https://api.anthropic.com/v1
 LLM_MODEL=claude-3-haiku-20240307
 ```
 
-**Note:** This bot is configured for Gemini by default. To use other APIs, you'll need to modify `src/services/llm.js` to use the appropriate API client.
+**Note:** This bot is configured for OpenAI by default. To use other APIs, you'll need to modify `src/services/llm.js` to use the appropriate API client.
 
 ## Rate Limiting & Cost Control
 
