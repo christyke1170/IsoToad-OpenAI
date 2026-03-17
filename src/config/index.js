@@ -21,9 +21,10 @@ const config = {
     temperature: 0.7,
   },
 
-  // FFLogs V1 API Configuration
+  // FFLogs V2 API Configuration
   fflogs: {
-    apiKey: process.env.FFLOGS_API_KEY,
+    clientId: process.env.FFLOGS_CLIENT_ID,
+    clientSecret: process.env.FFLOGS_CLIENT_SECRET,
   },
 
   // Rate Limiting

@@ -4,7 +4,7 @@ const rateLimiter = require('../utils/rateLimiter');
 const memory = require('../utils/memory');
 const retrieval = require('./retrieval');
 const ffxivSearch = require('./ffxiv-search');
-const fflogs = require('./fflogs');
+const fflogs = require('./fflogsService');
 
 /**
  * LLM Service
@@ -142,7 +142,7 @@ other rules:
    * @returns {object} - { content: string, tokens: number }
    */
   async chat(channelId, userMessage, username, botMentioned, isReplyToBot, client, attachments = []) {
-    // Route FFLogs-style requests to FFLogs V1 first (no normal LLM answering path)
+    // Route FFLogs-style requests to FFLogs V2 first (no normal LLM answering path)
     if (fflogs.isFFLogsQuery(userMessage)) {
       logger.info('Routing message to FFLogs service', {
         channelId,
@@ -458,7 +458,7 @@ other rules:
 
     if (!result.hasData || !result.data) {
       return {
-        content: "i couldn't verify that on fflogs.",
+        content: result.noDataMessage || "i couldn't verify that on fflogs.",
         tokens: 0,
       };
     }
@@ -469,6 +469,13 @@ other rules:
         tokens: 0,
       };
     }
+
+    logger.info('FFLogs raw selected object before formatting', {
+      metric: result.metric,
+      metricUsed: result.metricUsed,
+      parsed: result.parsed,
+      selectedData: result.data,
+    });
 
     const formatted = await this.formatFFLogsWithLLM(result);
     return {
@@ -488,6 +495,7 @@ other rules:
   }
 
   formatNumeric(value, decimals = 2) {
+    if (value === null || value === undefined || value === '') return 'unavailable';
     const number = Number(value);
     if (!Number.isFinite(number)) return 'unavailable';
     return number.toFixed(decimals);
@@ -509,57 +517,74 @@ other rules:
     return 'unavailable';
   }
 
-  buildReportUrl(parseData) {
-    const reportId = parseData?.reportID || parseData?.reportId;
-    if (!reportId) return 'unavailable';
-
-    const fightId = parseData?.fightID || parseData?.fightId;
-    if (fightId !== null && fightId !== undefined && fightId !== '') {
-      return `https://www.fflogs.com/reports/${reportId}#fight=${fightId}`;
-    }
-
-    return `https://www.fflogs.com/reports/${reportId}`;
+  buildPlayerPageUrl(parseData) {
+    return parseData?.playerPage || 'unavailable';
   }
 
   buildRequiredFFLogsResponse(result, parseData) {
-    const character = result.parsed.characterName || 'unknown character';
-    const server = result.parsed.server || 'unknown server';
-    const fightName = parseData?.encounterName || parseData?.name || result.selectedEncounter || 'unavailable';
-    const job = parseData?.spec || parseData?.job || parseData?.class || 'unavailable';
+    const character = parseData?.characterName || result.parsed.characterName || 'unknown character';
+    const server = parseData?.server || result.parsed.server || 'unknown server';
+    const encounterName = parseData?.encounterName || result.selectedEncounter || 'unavailable';
+    const encounterId = parseData?.encounterID ?? 'unavailable';
+    const job = parseData?.spec || 'unavailable';
+    const difficulty = parseData?.difficulty || result.selectedDifficulty || 'unknown';
     const percentile = this.formatNumeric(parseData?.percentile, 2);
     const rank = parseData?.rank !== undefined && parseData?.rank !== null ? String(parseData.rank) : 'unavailable';
+    const regionRank = parseData?.regionRank !== undefined && parseData?.regionRank !== null ? String(parseData.regionRank) : 'unavailable';
+    const serverRank = parseData?.serverRank !== undefined && parseData?.serverRank !== null ? String(parseData.serverRank) : 'unavailable';
     const duration = this.formatDuration(parseData?.duration);
-    const adps = this.formatNumeric(parseData?.adps ?? parseData?.aDPS, 2);
-    const adpsFromTotal = this.formatNumeric(parseData?.total, 2);
-    const patch = this.resolvePatchValue(parseData);
-    const reportUrl = this.buildReportUrl(parseData);
-    const difficulty = result.selectedDifficulty || 'unknown';
-    const metricUsed = result.metricUsed || result.requestedParseMetric || 'dps';
-    const metricSourceField = result.metricSourceField || 'unknown';
-    const metricValue = this.formatNumeric(result.selectedMetricValue, 2);
-    const metricsPresent = Array.isArray(result.rawMetricFieldsPresent) && result.rawMetricFieldsPresent.length > 0
-      ? result.rawMetricFieldsPresent.join(', ')
-      : 'none';
-    const fallbackNote = result.metricFallbackUsed
-      ? `yes (${result.metricFallbackReason || 'no reason provided'})`
-      : 'no';
+    const dps = this.formatNumeric(parseData?.dps, 2);
+    const rdps = this.formatNumeric(parseData?.rdps, 2);
+    const adps = this.formatNumeric(parseData?.adps, 2);
+    const playerPage = this.buildPlayerPageUrl(parseData);
+    const metricUsed = result.metricUsed || 'percentile';
+    const metricValue = metricUsed === 'percentile'
+      ? percentile
+      : this.formatNumeric(parseData?.[metricUsed], 2);
+    const reportId = parseData?.reportID ?? null;
+    const fightId = parseData?.fightID ?? null;
 
-    return [
-      `${difficulty} ${metricUsed} parse found`,
+    const parseHeadline = result.metric === 'best_parse'
+      ? 'best parse found'
+      : `${difficulty !== 'unknown' ? `${difficulty} ` : ''}${metricUsed} parse found`;
+
+    const ndps = this.formatNumeric(parseData?.ndps, 2);
+    const cdps = this.formatNumeric(parseData?.cdps, 2);
+    const metricParts = [
+      `rdps: ${rdps}`,
+      `adps: ${adps}`,
+      `dps: ${dps}`,
+      `ndps: ${ndps}`,
+    ];
+
+    if (cdps !== 'unavailable') {
+      metricParts.push(`cdps: ${cdps}`);
+    }
+
+    const metricSummary = metricParts.join(' | ');
+
+    const lines = [
+      parseHeadline,
       `${character} | ${server}`,
-      `fight name: ${fightName}`,
+      `encounter name: ${encounterName}`,
+      `encounter id: ${encounterId}`,
       `job: ${job}`,
-      `percentile: ${percentile} | rank: ${rank}`,
+      `percentile: ${percentile} | rank: ${rank} | region rank: ${regionRank} | server rank: ${serverRank}`,
+      `metrics: ${metricSummary}`,
+      `selected metric (${metricUsed}): ${metricValue}`,
       `duration: ${duration}`,
-      `metric used: adps | value: ${metricValue}`,
-      `metric source field: ${metricSourceField}`,
-      `adps (native): ${adps} | adps (from total): ${adpsFromTotal}`,
-      `metrics present in response: ${metricsPresent}`,
-      `metric fallback used: ${fallbackNote}`,
-      `patch: ${patch}`,
-      `report: ${reportUrl}`,
-      `selected difficulty: ${difficulty}`,
-    ].join('\n');
+      `player page: ${playerPage}`,
+    ];
+
+    if (reportId !== null && reportId !== undefined && reportId !== '') {
+      lines.push(`report id: ${reportId}`);
+    }
+
+    if (fightId !== null && fightId !== undefined && fightId !== '') {
+      lines.push(`fight id: ${fightId}`);
+    }
+
+    return lines.join('\n');
   }
 
   /**

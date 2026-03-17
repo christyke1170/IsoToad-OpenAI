@@ -47,8 +47,9 @@ BOT_NAME=AI Assistant
 MAX_MESSAGES_PER_MINUTE=10
 MAX_TOKENS_PER_DAY=100000
 
-# FFLogs V1 API Key
-FFLOGS_API_KEY=your_fflogs_api_key_here
+# FFLogs V2 OAuth Credentials
+FFLOGS_CLIENT_ID=your_fflogs_client_id_here
+FFLOGS_CLIENT_SECRET=your_fflogs_client_secret_here
 ```
 
 ### 3. Run the Bot
